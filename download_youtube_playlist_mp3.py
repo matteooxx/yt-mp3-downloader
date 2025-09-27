@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 YouTube Playlist/Video → MP3 Downloader (TXT Report, Auto-Detect)
@@ -83,7 +82,9 @@ def progress_hook(d):
 def build_ydl_opts(out_dir: Path, logger: CaptureLogger):
     outtmpl = str(out_dir / "%(title)s [%(id)s].%(ext)s")
     return {
-        'format': 'bestaudio/best',
+        # Prefer m4a (commonly available as high-quality audio on YouTube),
+        # fall back to best audio, then best overall.
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'outtmpl': outtmpl,
         'ignoreerrors': True,
         'prefer_ffmpeg': True,
@@ -91,6 +92,13 @@ def build_ydl_opts(out_dir: Path, logger: CaptureLogger):
         'concurrent_fragment_downloads': 5,
         'retries': 10,
         'fragment_retries': 10,
+        # Allow yt-dlp to try formats that may be marked unplayable as a fallback
+        # (can help when YouTube forces newer streaming clients / SABR).
+        'allow_unplayable_formats': True,
+    # Force a different YouTube player client when extracting (helps when
+    # YouTube is forcing SABR/web-only formats). This mirrors
+    # --extractor-args "youtube:player_client=android" behavior.
+    'extractor_args': {'youtube': {'player_client': 'android'}},
         'windowsfilenames': True,
         'writethumbnail': False,  # no images
         'postprocessors': [
@@ -195,6 +203,7 @@ def main():
         pre_existing = (find_mp3_by_id(out_dir, vid) is not None) if vid else False
 
         try:
+            # Primary download attempt
             with ytdlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
 
@@ -222,10 +231,43 @@ def main():
                 print(f"   ↳ {status.upper()}: {reason}")
 
         except Exception as ex:
+            # If the failure looks like SABR / format-unavailable (only images,
+            # requested format missing, signature extraction), try a single
+            # retry with an alternate extractor arg form and a broader format.
+            msg = str(ex)
+            retried = False
+            if any(k in msg for k in ("Only images are available", "Requested format is not available", "Signature extraction failed")):
+                retried = True
+                fb_logger = CaptureLogger(prefix=logger.prefix + "FALLBACK ")
+                fb_opts = dict(ydl_opts)
+                # Use string-style extractor args as an alternative and
+                # fall back to best audio if m4a wasn't available.
+                fb_opts['extractor_args'] = {'youtube': 'player_client=android'}
+                fb_opts['format'] = 'bestaudio/best'
+                fb_opts['logger'] = fb_logger
+                try:
+                    with ytdlp.YoutubeDL(fb_opts) as ydl:
+                        ydl.download([video_url])
+
+                    mp3_path = find_mp3_by_id(out_dir, vid) if vid else None
+                    if mp3_path:
+                        results.append({"index": idx, "id": vid, "title": title,
+                                        "status": "success", "reason": "OK (fallback)"})
+                        total_ok += 1
+                        print("   ↳ OK (fallback)")
+                        # merge fallback logs into main logger for reporting
+                        logger.messages.extend(fb_logger.messages)
+                        continue
+                except Exception as ex2:
+                    # merge fallback logs and fall through to final failure
+                    logger.messages.extend(fb_logger.messages)
+                    msg = str(ex2)
+
             total_fail += 1
+            reason_text = msg if not retried else (msg + " (fallback attempted)")
             results.append({"index": idx, "id": vid, "title": title,
-                            "status": "fail", "reason": str(ex)})
-            print(f"   ↳ FAILED: {ex}")
+                            "status": "fail", "reason": reason_text})
+            print(f"   ↳ FAILED: {reason_text}")
 
     # TXT Report with 000_ prefix
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
