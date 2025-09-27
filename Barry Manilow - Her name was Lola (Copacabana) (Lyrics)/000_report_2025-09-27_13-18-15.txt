@@ -1,7 +1,0 @@
-[1] Barry Manilow - Her name was Lola (Copacabana) (Lyrics) [WJEhnaez1w4]  →  SUCCESS (OK)
-
-=== SUMMARY ===
-Total items: 1
-  ✓ Success: 1
-  → Skipped: 0
-  ✗ Failed:  0

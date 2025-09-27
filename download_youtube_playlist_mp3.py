@@ -12,6 +12,7 @@ YouTube Playlist/Video → MP3 Downloader (TXT Report, Auto-Detect)
 
 import sys
 import re
+from urllib.parse import urlparse, parse_qsl, urlunparse, urlencode
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,25 @@ except ImportError:
 def sanitize_for_fs(name: str) -> str:
     name = name.strip().replace("\n", " ").replace("\r", " ")
     return re.sub(r'[\\/:*?"<>|]+', "_", name).strip()
+
+
+def extract_video_id_from_url(u: str) -> str | None:
+    """Try to extract a YouTube video id from a URL or return None."""
+    if not u:
+        return None
+    # Common short youtu.be links
+    m = re.search(r'youtu\.be/([A-Za-z0-9_-]{11})', u)
+    if m:
+        return m.group(1)
+    # watch?v= style
+    m = re.search(r'[?&]v=([A-Za-z0-9_-]{11})', u)
+    if m:
+        return m.group(1)
+    # fallback: last 11-char path segment
+    m = re.search(r'/([A-Za-z0-9_-]{11})(?:$|\?)', u)
+    if m:
+        return m.group(1)
+    return None
 
 
 class CaptureLogger:
@@ -149,6 +169,23 @@ def main():
         print("No URL provided. Exiting.")
         return
 
+    # If the URL contains a playlist query ('list='), offer to strip it so
+    # the link is treated as a single video (common case when copying the
+    # 'share' URL that includes a list param). This avoids accidental bulk
+    # downloads when the user intended a single video.
+    parsed = urlparse(url)
+    qs = dict(parse_qsl(parsed.query))
+    if 'list' in qs:
+        resp = input("The URL contains a playlist parameter (list=...).\nStrip the playlist parameter and treat as single video? [Y/n]: ").strip().lower()
+        if resp in ('', 'y', 'yes'):
+            qs.pop('list', None)
+            new_query = urlencode(qs)
+            parsed = parsed._replace(query=new_query)
+            url = urlunparse(parsed)
+            print("Playlist parameter removed; proceeding with single-video URL.")
+        else:
+            print("Keeping playlist parameter; proceeding (script will ask before large downloads).")
+
     base_dir = Path(__file__).parent.resolve()
 
     try:
@@ -168,7 +205,35 @@ def main():
         collection_type = "single"
         default_title = "Untitled_Video"
 
-    collection_title = sanitize_for_fs(info.get("title") or default_title)
+    # Safety: if the input URL contains a playlist parameter or multiple
+    # entries were found, confirm with the user before downloading all items.
+    if ("list=" in url) or (len(entries) > 1):
+        n = len(entries)
+        resp = input(f"Detected {n} item(s) (playlist). Download all items? [y/N]: ").strip().lower()
+        if resp not in ("y", "yes"):
+            resp2 = input("Download only the first item instead? [y/N]: ").strip().lower()
+            if resp2 in ("y", "yes"):
+                    first = entries[0]
+                    # Normalize to a single watch URL to avoid playlist behavior
+                    vid = first.get('id') or extract_video_id_from_url(first.get('url') or first.get('webpage_url') or '')
+                    if vid:
+                        entries = [{'id': vid, 'title': first.get('title'), 'url': f'https://www.youtube.com/watch?v={vid}'}]
+                    else:
+                        entries = [entries[0]]
+                    collection_type = "single"
+                    default_title = "Untitled_Video"
+            else:
+                print("Aborted by user.")
+                return
+
+    # Choose a sensible output folder name depending on final selection
+    if collection_type == "playlist":
+        collection_title = sanitize_for_fs(info.get("title") or default_title)
+    else:
+        # For single items, prefer the video's title if available
+        first = entries[0] if entries else {}
+        collection_title = sanitize_for_fs(first.get("title") or info.get("title") or default_title)
+
     out_dir = base_dir / collection_title
     out_dir.mkdir(parents=True, exist_ok=True)
 
